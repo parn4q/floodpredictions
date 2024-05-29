@@ -1,0 +1,299 @@
+---
+title: "Predicting Floods"
+author: "Andrew Ross"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+The file contains code to analyze flood predictions in different regions.  The data was collected from a Kaggle
+competition to practice modeling skills.
+
+```{r}
+#load packages
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(tidyr)
+library(ggpubr)
+library(car)
+```
+
+
+```{r}
+#load training data
+
+data = read.csv("D:\\Kaggle\\Flood Prediction\\train.csv")
+
+data = data |> slice_sample(n = 100000)
+
+```
+
+
+```{r}
+#check missing data
+
+str(data)
+summary(data)
+
+
+```
+
+# Univariate
+
+
+```{r}
+
+for(i in colnames(data)){
+  print(ggplot(data = data, mapping = aes_string(i)) + geom_bar())
+}
+
+
+```
+
+We have 21 integer variables and 1 numeric variable. Most of the data appears to be normally distributed
+
+
+# Bivariate
+
+
+```{r}
+ggcorrplot::ggcorrplot(cor(data))
+```
+
+Flood probability is linear correlated with every variable except ID.
+
+```{r}
+for(i in colnames(data)){
+  print(ggplot(data = data, mapping = aes_string(x = i)) + geom_point(aes(y = FloodProbability)))
+}
+```
+
+```{r}
+for(i in colnames(data)){
+  print(ggplot(data = data, mapping = aes_string(x = i)) + geom_point(aes(y = MonsoonIntensity)))
+}
+```
+
+# Transformations
+
+```{r}
+ggplot(data  = data, mapping = aes(x = sqrt(MonsoonIntensity)))+geom_histogram()
+ggplot(data  = data, mapping = aes(x = sqrt(MonsoonIntensity)))+geom_point(aes(y = FloodProbability))
+
+
+var(data$MonsoonIntensity)
+var(sqrt(data$MonsoonIntensity))
+
+
+bc = boxCox(lm(FloodProbability~1, data = data), plotit = TRUE)
+lambda = bc$x[which.max(bc$y)]
+
+new_x_exact <- (data$MonsoonIntensity^lambda - 1) / lambda
+
+hist(new_x_exact)
+
+b = boxCox(lm(FloodProbability~1, data = data), family="yjPower", plotit = TRUE)
+yjlam = b$x[which.max(b$y)]
+
+hist(yjPower(data$MonsoonIntensity, lambda = yjlam))
+
+
+
+```
+
+
+# linear mod
+
+```{r}
+linmod = lm(FloodProbability~., data = data |> select(-id))
+summary(linmod)
+
+plot(linmod)
+
+```
+
+```{r}
+
+mean((data$FloodProbability - predict(linmod))^2)
+
+```
+
+
+# square root transformated lin mod
+
+```{r}
+cn = colnames(data|>select(-FloodProbability))
+sqdata = data |> mutate(across(all_of(cn), sqrt))
+```
+
+
+```{r}
+linmod2 = lm(FloodProbability~., data = sqdata |> select(-id))
+summary(linmod2)
+
+plot(linmod2)
+
+mean((data$FloodProbability - predict(linmod2))^2)
+
+
+```
+
+# Test data
+
+```{r}
+
+test = read.csv("D:\\Kaggle\\Flood Prediction\\test.csv")
+  
+```
+
+
+# Mars
+
+```{r}
+
+fc = trainControl(method = 'cv', number = 5)
+
+marstune = expand.grid(degree = c(2), nprune = 41)
+
+mars = train(x = data |> select(-id, -FloodProbability), y = data$FloodProbability,
+             method = 'earth', 
+             #preProcess = c('center', 'scale'),
+             trControl = fc, 
+             metric = 'MSE', 
+             tuneGrid = marstune)
+
+#degree = 2 and nprune = 41 is the best via cross validation
+
+mars
+
+
+marspred = predict(mars, newdata = test)
+
+mean((test$FloodProbability-marspred[,1])^2)
+
+marsdf = cbind(test$id, marspred)
+colnames(marsdf) = c('id', 'FloodProbability')
+
+write.csv(marsdf, file = "D:\\Kaggle\\Flood Prediction\\marspred.csv")
+
+```
+
+
+# XGboost tree
+
+```{r}
+fc = trainControl(method = 'cv', number = 5)
+
+xgtune = expand.grid(nrounds = c(2100),
+                     max_depth = c(2),
+                     eta = c(0.5),
+                     gamma = c(0),
+                     colsample_bytree = 1,
+                     min_child_weight = 1,
+                     subsample = 1)
+
+xg = train(x = data |> select(-id, -FloodProbability), y = data$FloodProbability,
+             method = 'xgbTree', 
+             #preProcess = c('center', 'scale'),
+             trControl = fc, 
+             metric = 'MSE', 
+             tuneGrid = xgtune)
+
+xg
+
+xgpred = predict(xg, test)
+
+mean((data$FloodProbability-xgpred)^2)
+
+xgdf = cbind(test$id, xgpred)
+colnames(xgdf) = c('id', 'FloodProbability')
+write.csv(xgdf, file = "D:\\Kaggle\\Flood Prediction\\xgdf.csv")
+
+
+
+```
+
+
+
+
+
+# XGboost linear
+
+```{r}
+fc = trainControl(method = 'cv', number = 5)
+
+xgtune = expand.grid(nrounds = c(seq(10,100,10)),
+                     lambda = c(seq(0.1, 0.3,0.1)),
+                     alpha = c(0.1, 0.3, 0.1),
+                     eta = c(seq(0.1, 0.3, 0.1)))
+                     
+                    
+
+xglin = train(x = data |> select(-id, -FloodProbability), y = data$FloodProbability,
+             method = 'xgbLinear', 
+             #preProcess = c('center', 'scale'),
+             trControl = fc, 
+             metric = 'MSE', 
+             tuneGrid = xgtune)
+
+xglin
+
+xglinpred = predict(xglin, test)
+
+mean((data$FloodProbability-xglinpred)^2)
+
+#xgdf = cbind(test$id, xgpred)
+#colnames(xgdf) = c('id', 'FloodProbability')
+#write.csv(xgdf, file = "D:\\Kaggle\\Flood Prediction\\xgdf.csv")
+
+
+
+```
+
+
+
+
+# GBM
+
+```{r}
+fc = trainControl(method = 'cv', number = 5)
+
+gbmtune = expand.grid(n.trees = c(9800),
+                     interaction.depth = c(1),
+                     n.minobsinnode = c(1),
+                     shrinkage = c(0.17))
+                     
+                    
+
+gbm = train(x = data |> select(-id, -FloodProbability), y = data$FloodProbability,
+             method = 'gbm', 
+             trControl = fc, 
+             metric = 'MSE', 
+             tuneGrid = gbmtune)
+
+gbm
+
+gbmpred = predict(gbm, newdata = test)
+
+mean((data$FloodProbability-gbmpred)^2)
+
+gbmdf = cbind(test$id, gbmpred)
+colnames(gbmdf) = c('id', 'FloodProbability')
+write.csv(gbmdf, file = "D:\\Kaggle\\Flood Prediction\\xgdf.csv")
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
